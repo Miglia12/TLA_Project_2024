@@ -1,66 +1,95 @@
------------------------------- MODULE main --------------------------------
+------------------------------ MODULE main ------------------------------
 EXTENDS Integers, Sequences
 
-CONSTANT Data  \* The set of all possible data values.
-
-VARIABLES CpuBroker,   \* The last <<value, bit>> record cpu_broker decided to send.
-          GpuKernel    \* The last <<value, bit>> record gpu_kernel received.
-          
-(***************************************************************************)
-(* Type correctness means that CpuBroker and GpuKernel are records         *)
-(* [value |-> d, bit |-> i] where d \in Data and i \in {0, 1}.             *)
-(***************************************************************************)
-TypeOK == /\ CpuBroker \in [value: Data, bit: {0, 1}]
-          /\ GpuKernel \in [value: Data, bit: {0, 1}]
-          
-
-Remove(i, seq) == [j \in 1..(Len(seq)-1) |-> IF j < i THEN seq[j] ELSE seq[j+1]]
+VARIABLES Data,      \* The set of all possible data values.
+          StatesCpu, \* The set of all possible CPU states.
+          Cpu,       \* The record containing the state and the value.
+          Buffer,    \* The buffer where the CPU will put the value.
+          Gpu        \* The buffer where the GPU will store its values.
 
 (***************************************************************************)
-(* It's useful to define vars to be the tuple of all variables, for        *)
-(* example so we can write [Next]_vars instead of [Next]_<< ...  >>        *)
+(* Define a placeholder for the initial empty value for the CPU.           *)
 (***************************************************************************)
-vars == << CpuBroker, GpuKernel >>
-
+CONSTANT NULL
 
 (***************************************************************************)
-(* Initially CpuBroker can equal [value |-> d, bit |-> 1] for any Data     *)
-(* value d, and GpuKernel equals CpuBroker.                                *)
+(* Cpu is a record with a state in StatesCpu and a value in Data or NULL,  *)
+(* Buffer is either empty or contains elements from Data,                  *)
+(* Gpu is either empty or contains elements from Data.                     *)
 (***************************************************************************)
-Init == /\ CpuBroker \in [value: Data, bit: {1}] 
-        /\ GpuKernel = CpuBroker
+TypeOK == /\ Cpu \in [state : StatesCpu, value : {NULL} \cup Data]
+          /\ Buffer \in <<>> \cup Seq(Data)
+          /\ Gpu \in <<>> \cup Seq(Data)
+          /\ StatesCpu = {"idle", "fetching", "sending"}
+
+vars == << Data, StatesCpu, Cpu, Buffer, Gpu >>
 
 (***************************************************************************)
-(* When CpuBroker = GpuKernel, the sender can "send" an arbitrary data d   *)
-(* item by setting CpuBroker.value to d and complementing CpuBroker.bit.   *)
-(* It then waits until the receiver "receives" the message by setting      *)
-(* GpuKernel to CpuBroker before it can send its next message.             *)
-(* Sending is described by action A and receiving by action B.             *)
+(* Initially, Data is set to some initial values, StatesCpu contains the   *)
+(* possible states, the CPU is in the "idle" state with no value,          *)
+(* Buffer is empty, and Gpu is empty.                                      *)
 (***************************************************************************)
-A == /\ CpuBroker = GpuKernel
-     /\ \E d \in Data: CpuBroker' = [value |-> d, bit |-> 1 - CpuBroker.bit]
-     /\ GpuKernel' = GpuKernel
+Init == /\ Data = {1, 2, 3, 4, 5}
+        /\ StatesCpu = {"idle", "fetching", "sending"}
+        /\ Cpu = [state |-> "idle", value |-> NULL]
+        /\ Buffer = <<>>
+        /\ Gpu = <<>>
 
-B == /\ CpuBroker # GpuKernel
-     /\ GpuKernel' = CpuBroker
-     /\ CpuBroker' = CpuBroker
+(***************************************************************************)
+(* Action Fetch defines the CPU transitioning from "idle" to "fetching"    *)
+(* state and fetching a value from Data.                                   *)
+(***************************************************************************)
+Fetch == /\ Cpu.state = "idle"
+         /\ Data # {}
+         /\ LET d == CHOOSE x \in Data : TRUE IN
+            Cpu' = [Cpu EXCEPT !.state = "fetching", !.value = d]
+         /\ UNCHANGED <<Buffer, Gpu, Data, StatesCpu>>
 
-Next == A \/ B
+(***************************************************************************)
+(* Action Put defines the CPU putting its value into the Buffer if the     *)
+(* Buffer is empty and CPU is in "fetching" state, and removes the value   *)
+(* from the Data set.                                                      *)
+(***************************************************************************)
+Put == /\ Cpu.state = "fetching"
+       /\ Buffer = <<>>
+       /\ Buffer' = <<Cpu.value>>
+       /\ Cpu' = [Cpu EXCEPT !.state = "idle", !.value = NULL]
+       /\ Data' = Data \ {Cpu.value}
+       /\ UNCHANGED Gpu
+       /\ UNCHANGED StatesCpu
 
+(***************************************************************************)
+(* Action GpuAccess defines the GPU accessing the Buffer and storing the   *)
+(* value in its own buffer if the GPU buffer is empty and the CPU buffer   *)
+(* is not empty.                                                           *)
+(***************************************************************************)
+GpuAccess == /\ Buffer # <<>>
+             /\ Gpu = <<>>
+             /\ Gpu' = Buffer
+             /\ Buffer' = <<>>
+             /\ UNCHANGED <<Cpu, Data, StatesCpu>>
+
+(***************************************************************************)
+(* Next defines the possible next actions in the system.                   *)
+(***************************************************************************)
+Next == Fetch \/ Put \/ GpuAccess
+
+(***************************************************************************)
+(* The overall specification, Spec, starts with Init and requires that     *)
+(* Next is always enabled.                                                 *)
+(***************************************************************************)
 Spec == Init /\ [][Next]_vars
 
 (***************************************************************************)
-(* For understanding the spec, it's useful to define formulas that should  *)
-(* be invariants and check that they are invariant.  The following         *)
-(* invariant Inv asserts that, if CpuBroker and GpuKernel have equal       *)
-(* bit fields, then they are equal (which by the invariance of TypeOK      *)
-(* implies that they have equal value fields).                             *)
-(***************************************************************************)
-Inv == (CpuBroker.bit = GpuKernel.bit) => (CpuBroker = GpuKernel)
------------------------------------------------------------------------------
-(***************************************************************************)
-(* FairSpec is Spec with the addition requirement that it keeps taking     *)
+(* FairSpec is Spec with the additional requirement that it keeps taking   *)
 (* steps.                                                                  *)
 (***************************************************************************)
 FairSpec == Spec /\ WF_vars(Next)
+
+(***************************************************************************)
+(* Define the temporal property that eventually all data will be in the    *)
+(* GPU.                                                                    *)
+(***************************************************************************)
+AllDataInGpu == <> (Buffer = <<>> /\ Gpu # <<>> /\ Data = {})
+
 =============================================================================
