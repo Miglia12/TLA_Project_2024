@@ -4,76 +4,149 @@ EXTENDS Integers, Sequences
 VARIABLES Data,      \* The set of all possible data values.
           Cpu,       \* The record containing the state and the value.
           Buffer,    \* The buffer where the CPU will put the value.
-          Gpu        \* The buffer where the GPU will store its values.
-
+          GpuBuffer, \* The buffer where the GPU will store its values.
+          Gpu,       \* The record representing the GPU entity.
+          MsgChannel \* One way message channel from GPU to CPU.
 
 CONSTANTS NULL,      \* Placeholder for the initial empty value for the CPU
-          StatesCpu  \* The set of all possible CPU states
+          StatesCpu, \* The set of all possible CPU states
+          StatesGpu  \* The set of all possible GPU states
+          
+(***************************************************************************)
+(* Helper function to check if an element is not in a sequence.            *)
+(***************************************************************************)
+NotInSeq(elem, seq) == \A i \in 1..Len(seq) : elem # seq[i]
 
 (***************************************************************************)
-(* Cpu is a record with a state in StatesCpu and a value in Data or NULL,  *)
-(* Buffer is either empty or contains elements from Data,                  *)
-(* Gpu is either empty or contains elements from Data.                     *)
+(* Cpu is a record with a state in StatesCpu, a value in Data or NULL,     *)
+(* a remaining count which is an integer, and a list of subscribed GPU IDs.*)
+(* Buffer is a sequence of elements from Data or is empty.                 *)
+(* GpuBuffer is a sequence of elements from Data or is empty.              *)
+(* Gpu is a record with an ID and a state in StatesGpu.                    *)
+(* MsgChannel is a sequence of messages from GPU to CPU or is empty.       *)
 (***************************************************************************)
-TypeOK == /\ Cpu \in [state : StatesCpu, value : {NULL} \cup Data]
+TypeOK == /\ Cpu \in [state : StatesCpu, value : {NULL} \cup Data, remaining : Int, subscribed : Seq(Int)]
           /\ Buffer \in <<>> \cup Seq(Data)
-          /\ Gpu \in <<>> \cup Seq(Data)
-          /\ StatesCpu = {"idle", "fetching", "sending"}
+          /\ GpuBuffer \in <<>> \cup Seq(Data)
+          /\ Gpu \in [id : Int, state : StatesGpu]
+          /\ MsgChannel \in <<>> \cup Seq([id : Int, numData : Int])
+          /\ StatesCpu = {"processing", "fetching", "sending", "idle"}
+          /\ StatesGpu = {"idle", "requesting", "working"}
 
-vars == << Data, Cpu, Buffer, Gpu >>
+vars == << Data, Cpu, Buffer, GpuBuffer, Gpu, MsgChannel >>
 
 (***************************************************************************)
 (* Initially, Data is set to some initial values, StatesCpu contains the   *)
-(* possible states, the CPU is in the "idle" state with no value,          *)
-(* Buffer is empty, and Gpu is empty.                                      *)
+(* possible states, the CPU is in the "idle" state with no value and an    *)
+(* empty list of subscribed GPUs, Buffer is empty, GpuBuffer is empty,     *)
+(* Gpu is idle with ID 1, and MsgChannel is empty.                         *)
 (***************************************************************************)
-Init == /\ Data = {1, 2, 3, 4, 5}
-        /\ Cpu = [state |-> "idle", value |-> NULL]
+Init == /\ Data = {1, 2, 3}
+        /\ Cpu = [state |-> "idle", value |-> NULL, remaining |-> 0, subscribed |-> <<>>]
         /\ Buffer = <<>>
-        /\ Gpu = <<>>
+        /\ GpuBuffer = <<>>
+        /\ Gpu = [id |-> 1, state |-> "idle"]
+        /\ MsgChannel = <<>>
 
 (***************************************************************************)
-(* Action Fetch defines the CPU transitioning from "idle" to "fetching"    *)
-(* state and fetching a value from Data.                                   *)
+(* Action ReceiveMsg_CPU defines the CPU adding a new GPU to which it will *)
+(* have to provide data to.                                                *)
+(* The GPU can subscribe to get data at any given point, so the CPU keeps  *)
+(* a record of the subscribed GPU to avoid restarting the communication and*)
+(* blocking other GPUs. Upon receiving a message, if the ID of the GPU is  *)
+(* already in the list it will get discarded otherwise it will be added and*)
+(* the CPU will start providing data to the GPU.                           *)
 (***************************************************************************)
-FetchDataCPU == /\ Cpu.state = "idle"
-                /\ Data # {}
-                /\ LET d == CHOOSE x \in Data : TRUE IN
-                   /\ Cpu' = [Cpu EXCEPT !.state = "fetching", !.value = d]
-                   /\ UNCHANGED <<Buffer, Gpu, Data>>
+ReceiveMsg_CPU == /\ Cpu.state = "idle"
+                  /\ MsgChannel # <<>>
+                  /\ Data # {} \* TODO remove check eventually
+                  /\ LET msg == Head(MsgChannel) IN
+                     IF NotInSeq(msg.id, Cpu.subscribed) THEN
+                        /\ Cpu' = [Cpu EXCEPT !.state = "processing", !.remaining = msg.numData, !.subscribed = Append(Cpu.subscribed, msg.id)]
+                        /\ MsgChannel' = Tail(MsgChannel)
+                     ELSE
+                        /\ Cpu' = [Cpu EXCEPT !.state = "processing"]
+                        /\ MsgChannel' = Tail(MsgChannel)
+                  /\ UNCHANGED <<Buffer, Gpu, GpuBuffer, Data>>
 
 (***************************************************************************)
-(* Action SendDataCPU defines the CPU appending its value to the Buffer if *)
-(* the CPU is in "fetching" state, and removes the value from the Data set.*)
+(* Action FetchData_CPU defines the CPU transitioning to the               *)
+(* state "fetching". Until the subscribed GPU needs data (Cpu.remaining)   *)
+(* the CPU will provide it with data.                                      *)
 (***************************************************************************)
-SendDataCPU == /\ Cpu.state = "fetching"
-               /\ Buffer' = Append(Buffer, Cpu.value)
-               /\ Cpu' = [Cpu EXCEPT !.state = "sending", !.value = NULL]
-               /\ Data' = Data \ {Cpu.value}
-               /\ UNCHANGED Gpu
-               
+FetchData_CPU ==    /\ Cpu.state = "idle"
+                    /\ Cpu.remaining > 0
+                    /\ Cpu.value = NULL
+                    /\ Data # {} \* TODO remove check eventually
+                    /\ LET d == CHOOSE x \in Data : TRUE IN
+                        /\ Cpu' = [Cpu EXCEPT !.state = "fetching", !.value = d, !.remaining = @ - 1]
+                    /\ UNCHANGED <<Buffer, Gpu, GpuBuffer, Data, MsgChannel>>
+
 (***************************************************************************)
-(* Action IdleCPU makes the CPU idle after sending the data.     *)
-(* the CPU is in "fetching" state, and removes the value from the Data set.*)
+(* Action SendData_CPU defines the CPU transitioning to the state "sending".*)
+(* The CPU will happend the data it fetched in the buffer to that the GPU  *)
+(* can fetch it.                                                          *)
 (***************************************************************************)
-IdleCPU ==     /\ Cpu.state = "sending"
+SendData_CPU == /\ Cpu.state = "idle"
+                /\ Cpu.value # NULL
+                /\ Data # {} \* TODO remove check eventually
+                /\ Buffer' = Append(Buffer, Cpu.value)
+                /\ Cpu' = [Cpu EXCEPT !.state = "sending", !.value = NULL]
+                /\ Data' = Data \ {Cpu.value}
+                /\ UNCHANGED <<Gpu, GpuBuffer, MsgChannel>>
+
+(***************************************************************************)
+(* Action Idle_CPU makes the CPU idle after every action.                  *)
+(***************************************************************************)
+Idle_CPU ==    /\ Cpu.state \in {"fetching", "sending", "processing"}
                /\ Cpu' = [Cpu EXCEPT !.state = "idle"]
-               /\ UNCHANGED <<Buffer, Gpu, Data>>
+               /\ UNCHANGED <<Buffer, Gpu, GpuBuffer, Data, MsgChannel>>
 
 (***************************************************************************)
-(* Action RcvDataGPU defines the GPU accessing the first element of the    *)
-(* Buffer, storing it in its own buffer, and removing it from the Buffer.  *)
+(* Action Subscribe_GPU defines the GPU sending a message to the CPU and   *)
+(* transitioning to "requesting" state.                                    *)
+(* The CPU will receive that message and start fetching data.              *)
+(* The value "numData" is the number of data items the CPU will have to    *)
+(* fetch. The value "id" is a unique identifier for each GPU.              *)
 (***************************************************************************)
-RcvDataGPU == /\ Buffer # <<>>
-              /\ LET firstElem == Head(Buffer) IN
-                   /\ Gpu' = Append(Gpu, firstElem)
-                   /\ Buffer' = Tail(Buffer)
-              /\ UNCHANGED <<Cpu, Data>>
+Subscribe_GPU == /\ Gpu.state = "idle"
+                 /\ Buffer = <<>>
+                 /\ Data # {} \* TODO remove check eventually
+                 /\ LET msg == [id |-> Gpu.id, numData |-> 3] IN
+                      /\ MsgChannel' = Append(MsgChannel, msg)
+                      /\ Gpu' = [Gpu EXCEPT !.state = "requesting"]
+                 /\ UNCHANGED <<Buffer, Cpu, GpuBuffer, Data>>
+
+(***************************************************************************)
+(* Action RcvData_GPU defines the GPU transitioning to "working" state.    *)
+(* The GPU accessing the first element of the Buffer,                      *)
+(* storing it in its own buffer, and removing it from the Buffer.       *)
+(***************************************************************************)
+RcvData_GPU == /\ Gpu.state = "idle"
+               /\ Buffer # <<>>
+               /\ LET firstElem == Head(Buffer) IN
+                    /\ GpuBuffer' = Append(GpuBuffer, firstElem)
+                    /\ Buffer' = Tail(Buffer)
+               /\ Gpu' = [Gpu EXCEPT !.state = "working"]
+               /\ UNCHANGED <<Cpu, Data, MsgChannel>>
+
+(***************************************************************************)
+(* Action Idle_GPU makes the GPU idle after every action.                  *)
+(***************************************************************************)
+Idle_GPU == /\ Gpu.state \in {"requesting", "working"}
+           /\ Gpu' = [Gpu EXCEPT !.state = "idle"]
+           /\ UNCHANGED <<Buffer, Cpu, GpuBuffer, Data, MsgChannel>>
 
 (***************************************************************************)
 (* Next defines the possible next actions in the system.                   *)
 (***************************************************************************)
-Next == FetchDataCPU \/ SendDataCPU \/ IdleCPU \/ RcvDataGPU
+Next ==     \/ReceiveMsg_CPU 
+            \/ FetchData_CPU 
+            \/ SendData_CPU 
+            \/ Idle_CPU 
+            \/ Subscribe_GPU 
+            \/ RcvData_GPU 
+            \/ Idle_GPU
 
 (***************************************************************************)
 (* The overall specification, Spec, starts with Init and requires that     *)
@@ -89,8 +162,8 @@ FairSpec == Spec /\ WF_vars(Next)
 
 (***************************************************************************)
 (* Define the temporal property that eventually all data will be in the    *)
-(* GPU.                                                                    *)
+(* GPU buffer.                                                             *)
 (***************************************************************************)
-AllDataInGpu == <> (Buffer = <<>> /\ Gpu # <<>> /\ Data = {})
+AllDataInGpu == <> (Buffer = <<>> /\ GpuBuffer # <<>> /\ Data = {})
 
-=============================================================================
+==========================================================================
