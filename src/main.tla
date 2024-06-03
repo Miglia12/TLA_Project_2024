@@ -22,20 +22,17 @@ NotInSeq(elem, seq) == \A i \in 1..Len(seq) : elem # seq[i]
 (* Helper function to find the index of an element in a sequence.          *)
 (***************************************************************************)
 IndexOf(elem, seq) == 
-    IF \E i \in 1..Len(seq) : seq[i] = elem THEN
-        CHOOSE i \in 1..Len(seq) : seq[i] = elem
-    ELSE
-        Len(seq) + 1  \* If elem is not found, return an index outside the range
+    CHOOSE i \in 1..Len(seq) : seq[i] = elem
 
 (***************************************************************************)
-(* Helper function to remove an element from a sequence.                   *)
+(* Helper function to remove the first occurrence of an element from a sequence. *)
 (***************************************************************************)
 RemoveFromSeq(elem, seq) == 
-    \* Create a new sequence by including elements from seq except the one equal to elem
-    [i \in 1..(Len(seq) - 1) |-> 
-        IF i < IndexOf(elem, seq) THEN seq[i]
-        ELSE seq[i + 1]
-    ]
+    IF ~ \E i \in 1..Len(seq) : seq[i] = elem THEN seq
+    ELSE [i \in 1..(Len(seq) - 1) |-> 
+            IF i < IndexOf(elem, seq) THEN seq[i]
+            ELSE seq[i + 1]
+         ]
 -------------------------------------------------------------------------------------------- 
 
 (***************************************************************************)
