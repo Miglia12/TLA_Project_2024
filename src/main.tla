@@ -3,12 +3,12 @@ EXTENDS Integers, Sequences
 
 VARIABLES Data,      \* The set of all possible data values.
           Cpu,       \* The record containing the state and the value.
-          logical_segments,    \* The map of buffers keyed by gpu_id.
-          Gpu,       \* The record representing the GPU entity.
+          logical_segments,    \* The map of memorys keyed by gpu_id.
+          KGpus,      \* The record representing the KGpus entities.
           PushChannel \* One way message channel from GPU to CPU.
 
 CONSTANTS NULL,      \* Placeholder for the empty value
-          ACK,      \* Placeholder for the ack value
+          ACK,       \* Placeholder for the ack value
           StatesCpu, \* The set of all possible CPU states
           StatesGpu, \* The set of all possible GPU states
           MAX_INT_VALUE, \* The ceiling for all data values
@@ -39,36 +39,58 @@ RemoveFromSeq(elem, seq) ==
 -------------------------------------------------------------------------------------------- 
 
 (***************************************************************************)
-(* Cpu is a record with a state in StatesCpu, a value in Data or NULL,     *)
-(* a subscription map with keys as GPU IDs and values as the remaining     *)
-(* data, and a sequence of subscribed GPU IDs.                             *)
-(* logical_segments is a map where keys are GPU IDs and values are sequences*)
-(* of elements from Data or are empty.                                     *)
-(* Gpu is a record with an ID, a state in StatesGpu, a counter for         *)
-(* the amount of data needed, and a buffer to store its values.            *)
-(* PushChannel is a sequence of messages from GPU to CPU or is empty.      *)
+(* TypeOK defines the types of the variables to ensure their correctness.  *)
+(* - Data: A set of integers within the range 0 to MAX_INT_VALUE excluding ACK. *)
+(* - Cpu: A record with fields:                                              *)
+(*   - state: Represents the state of the CPU, which can be "idle",          *)
+(*     "processing", "fetching", or "sending".                               *)
+(*   - value: Can be NULL or an integer within the range 0 to MAX_INT_VALUE  *)
+(*     excluding ACK.                                                        *)
+(*   - subs_map: A mapping from each KGPU to an integer within the range     *)
+(*     0 to MAX_INT_VALUE.                                                   *)
+(*   - subs_list: A sequence of integers representing KGpus.                 *)
+(* - logical_segments: A mapping from each KGPU to a sequence of elements    *)
+(*   that can be ACK or in Data.                                             *)
+(* - KGpus: A mapping from each KGPU to a record with fields:                 *)
+(*   - id: An identifier within the range 1 to N_KGPU.                       *)
+(*   - state: Represents the state of the GPU, which can be "idle",          *)
+(*     "requesting", "working", or "waiting".                                *)
+(*   - missing_data: An integer within the range 3 to MAX_INT_VALUE.         *)
+(*   - memory: A sequence of elements in Data.                               *)
+(* - PushChannel: A sequence of records, each containing:                    *)
+(*   - id: An identifier within the range 1 to N_KGPU.                       *)
+(*   - numData: An integer within the range 3 to MAX_INT_VALUE.              *)
 (***************************************************************************)
-TypeOK == /\ Cpu \in [  state : StatesCpu, 
-                        value : {NULL} \cup Data, 
-                        subs_map : [Int -> Int], 
-                        subs_list : Seq(Int)]
-          /\ Gpu \in [  id : Int, 
-                        state : StatesGpu, 
-                        missing_data : Int,     
-                        buffer : {ACK} \cup Seq(Data)]     
-          /\ logical_segments \in [Int -> {ACK} \cup Seq(Data)]
-          /\ PushChannel \in <<>> \cup Seq([id : Int, numData : Int])
-          /\ StatesCpu = {"processing", "fetching", "sending", "idle"}
-          /\ StatesGpu = {"idle", "requesting", "working", "waiting"}
+TypeOK == /\ Data \subseteq 0..MAX_INT_VALUE \ {ACK}
+          /\ Cpu \in [ state : {"idle", "processing", "fetching", "sending"},
+                      value : {NULL} \cup (0..MAX_INT_VALUE \ {ACK}),
+                      subs_map : [1..N_KGPU -> 0..MAX_INT_VALUE],
+                      subs_list : Seq(1..N_KGPU) ]
+          /\ logical_segments \in [1..N_KGPU -> Seq({ACK} \cup Data)]
+          /\ KGpus \in [1..N_KGPU -> [ id : 1..N_KGPU,
+                                      state : {"idle", "requesting", "working", "waiting"},
+                                      missing_data : 0..MAX_INT_VALUE,
+                                      memory : Seq(Data) ]]
+          /\ PushChannel \in Seq([id : 1..N_KGPU, numData : 3..MAX_INT_VALUE])
 
-vars == << Data, Cpu, logical_segments, Gpu, PushChannel >>
+vars == << Data, Cpu, logical_segments, KGpus, PushChannel >>
 
 (***************************************************************************)
-(* Initially, Data is a set of natural numbers up to MAX_INT_VALUE,       *)
-(* StatesCpu contains the possible states, the CPU is in the "idle" state  *)
-(* with no value and an empty subscription map and list, logical_segments  *)
-(* is empty, Gpu is idle with ID 1 and needs a random number of data items *)
-(* within 1 to MAX_INT_VALUE, and an empty buffer, and PushChannel is empty. *)
+(* Init defines the initial state of the system.                           *)
+(* - Data: Initialized to the range from ACK + 1 to MAX_INT_VALUE.         *)
+(* - Cpu: Initialized with:                                                *)
+(*   - state: Set to "idle".                                               *)
+(*   - value: Set to NULL.                                                 *)
+(*   - subs_map: Each KGPU is mapped to 0.                                 *)
+(*   - subs_list: An empty sequence.                                       *)
+(* - logical_segments: Each KGPU is mapped to an empty sequence.           *)
+(* - KGpus: Each KGPU is initialized with:                                 *)
+(*   - id: Set to its corresponding identifier.                            *)
+(*   - state: Set to "idle".                                               *)
+(*   - missing_data: Set to a value chosen within the range 3 to           *)
+(*     MAX_INT_VALUE.                                                      *)
+(*   - memory: An empty sequence.                                          *)
+(* - PushChannel: Initialized to an empty sequence.                       *)
 (***************************************************************************)
 Init == /\ Data = ACK + 1..MAX_INT_VALUE
         /\ Cpu = [  state |-> "idle", 
@@ -76,20 +98,23 @@ Init == /\ Data = ACK + 1..MAX_INT_VALUE
                     subs_map |-> [i \in 1..N_KGPU |-> 0], 
                     subs_list |-> <<>>]
         /\ logical_segments = [i \in 1..N_KGPU |-> <<>>]
-        /\ Gpu = [  id |-> 1, 
-                    state |-> "idle", 
-                    missing_data |-> CHOOSE x \in 3..MAX_INT_VALUE : TRUE, 
-                    buffer |-> <<>>]
+        /\ KGpus = [i \in 1..N_KGPU |-> [ id |-> i, 
+                                          state |-> "idle", 
+                                          missing_data |-> CHOOSE x \in 3..MAX_INT_VALUE : TRUE, 
+                                          memory |-> <<>>]]
         /\ PushChannel = <<>>
 
 (***************************************************************************)
-(* Action ReceiveMsg_CPU defines the CPU adding a new GPU to which it will *)
-(* have to provide data to.                                                *)
-(* The GPU can subscribe to get data at any given point, so the CPU keeps  *)
-(* a record of the subscribed GPU to avoid restarting the communication and*)
-(* blocking other GPUs. Upon receiving a message, if the ID of the GPU is  *)
-(* already in the list it will get discarded otherwise it will be added and*)
-(* the CPU will start providing data to the GPU.                           *)
+(* ReceiveMsg_CPU handles the reception of a message by the CPU.           *)
+(* - Cpu.state: Must be "idle".                                            *)
+(* - PushChannel: Must not be empty.                                       *)
+(* - msg: Is the first element of PushChannel.                     *)
+(* - Cpu': Updated with:                                                   *)
+(*   - state: Set to "processing".                                         *)
+(*   - subs_map: The entry for msg.id is updated to msg.numData.           *)
+(*   - subs_list: msg.id is appended to the list.                          *)
+(* - PushChannel': The read message gets removed.                         *)
+(* - logical_segments': The segment for msg.id is updated by appending ACK.*)
 (***************************************************************************)
 ReceiveMsg_CPU == /\ Cpu.state = "idle"
                   /\ PushChannel # <<>>
@@ -100,89 +125,123 @@ ReceiveMsg_CPU == /\ Cpu.state = "idle"
                                 !.subs_list = Append(Cpu.subs_list, msg.id)]
                     /\ PushChannel' = Tail(PushChannel)
                     /\ logical_segments' = [logical_segments EXCEPT ![msg.id] = Append(@, ACK)]
-                  /\ UNCHANGED <<Gpu, Data>>
+                  /\ UNCHANGED <<KGpus, Data>>
 
 (***************************************************************************)
-(* Action FetchData_CPU defines the CPU transitioning to the               *)
-(* state "fetching". Until the subscribed GPU needs data (Cpu.remaining)   *)
-(* the CPU will provide it with data.                                      *)
+(* FetchData_CPU defines the conditions and actions for fetching data by the CPU. *)
+(* - Cpu:                                                                  *)
+(*   - state: Must be "idle".                                              *)
+(*   - subs_list: Must not be empty.                                       *)
+(*   - value: Must be NULL.                                                *)
+(* - gpu_id: The head of Cpu.subs_list.                                    *)
+(*   - Cpu.subs_map[gpu_id]: Must be greater than 0. This means that the   *)
+(*                          GPU still needs some data.                     *)
+(* - d: Chosen from Data.                                                  *)
+(*   - Cpu': Updated with:                                                 *)
+(*     - state: Set to "fetching".                                         *)
+(*     - value: Set to d.                                                  *)
 (***************************************************************************)
-FetchData_CPU ==    /\ Cpu.state = "idle"
-                    /\ Cpu.subs_list # <<>>
-                    /\ LET gpu_id == Head(Cpu.subs_list) IN
-                        /\ Cpu.subs_map[gpu_id] > 0
-                        /\ Cpu.value = NULL
-                    /\ LET d == CHOOSE x \in Data : TRUE IN
-                        /\ Cpu' = [Cpu EXCEPT !.state = "fetching", !.value = d]
-                    /\ UNCHANGED <<logical_segments, Gpu, Data, PushChannel>>
+FetchData_CPU == 
+        /\ Cpu.state = "idle"
+        /\ Cpu.subs_list # <<>>
+        /\ Cpu.value = NULL
+        /\ LET gpu_id == Head(Cpu.subs_list) IN
+            IF Cpu.subs_map[gpu_id] # 0 THEN 
+                /\ LET d == CHOOSE x \in Data : TRUE IN
+                    /\ Cpu' = [Cpu EXCEPT !.state = "fetching", !.value = d]
+                /\ UNCHANGED <<logical_segments, KGpus, Data, PushChannel>>
+            ELSE
+                /\ Cpu' = [Cpu EXCEPT !.subs_list = Tail(@)]
+                /\ UNCHANGED <<KGpus, PushChannel, Data, logical_segments, Cpu.state, Cpu.value, Cpu.subs_map>>
 
 (***************************************************************************)
-(* Action SendData_CPU defines the CPU transitioning to the state "sending".*)
-(* The CPU will append the data it fetched to the buffer so that the GPU    *)
-(* can fetch it. If the subscription count for the GPU is zero, the GPU     *)
-(* identifier is removed from the subscription list without changing the    *)
-(* CPU state.                                                               *)
+(* SendData_CPU defines the transition for sending data by the CPU.        *)
+(* - Cpu.state: Must be "idle".                                            *)
+(* - Cpu.value: Must not be NULL.                                          *)
+(* - LET gpu_id: The first element in Cpu.subs_list.                       *)
+(*   - If Cpu.subs_map[gpu_id] = 0:                                        *)
+(*     - Then the KGPU gets unsuscribed since all data has been delivered. *)
+(*   - ELSE:                                                               *)
+(*     - Send the data to the KGPU                                         *)
+(*     - Cpu':                                                             *)
+(*       - state: Set to "sending".                                        *)
+(*       - value: Set to NULL.                                             *)
+(*       - subs_map[gpu_id]: Decrement by 1.                               *)
+(*     - Cpu'.subs_list: Append gpu_id to the tail of Cpu.subs_list.       *)
 (***************************************************************************)
-SendData_CPU ==
-                /\ Cpu.state = "idle"
-                /\ Cpu.value # NULL
-                /\ LET gpu_id == Head(Cpu.subs_list) IN
-                    IF (Cpu.subs_map[gpu_id] = 0) THEN 
-                        /\ Cpu'.subs_list = Tail(Cpu.subs_list)
-                        /\ UNCHANGED <<Gpu, PushChannel, Data, logical_segments, Cpu.state, Cpu.value, Cpu.subs_map>>
-                    ELSE
-                        /\ logical_segments' = [logical_segments EXCEPT ![gpu_id] = Append(@, Cpu.value)]
-                        /\ Cpu' = 
-                            [ Cpu EXCEPT 
-                                !.state = "sending", 
-                                !.value = NULL, 
-                                !.subs_map[gpu_id] = @ - 1 
-                            ]
-                        /\ Cpu'.subs_list = Append(Tail(Cpu.subs_list), gpu_id)
-                        /\ UNCHANGED <<Gpu, PushChannel, Data>>
+SendData_CPU == 
+    /\ Cpu.state = "idle"
+    /\ Cpu.value # NULL
+    /\ LET gpu_id == Head(Cpu.subs_list) IN
+        /\ logical_segments' = [logical_segments EXCEPT ![gpu_id] = Append(@, Cpu.value)]
+        /\ Cpu' = 
+            [ Cpu EXCEPT 
+                !.state = "sending", 
+                !.value = NULL, 
+                !.subs_map[gpu_id] = @ - 1,
+                !.subs_list = Append(Tail(@), gpu_id)
+            ]
+    /\ UNCHANGED <<KGpus, PushChannel, Data>>
 
 (***************************************************************************)
 (* Action Idle_CPU makes the CPU idle after every action.                  *)
 (***************************************************************************)
 Idle_CPU ==    /\ Cpu.state \in {"fetching", "sending", "processing"}
                /\ Cpu' = [Cpu EXCEPT !.state = "idle"]
-               /\ UNCHANGED <<logical_segments, Gpu, Data, PushChannel>>
+               /\ UNCHANGED <<logical_segments, KGpus, Data, PushChannel>>
 
 (***************************************************************************)
-(* Action Subscribe_GPU defines the GPU sending a message to the CPU and   *)
+(* Action Subscribe_GPU defines a GPU sending a message to the CPU and     *)
 (* transitioning to "requesting" state.                                    *)
-(* The CPU will receive that message and start fetching data.              *)
+(* The CPU will receive that message and immediatly send an ack.           *)
 (* The value "numData" is the number of data items the CPU will have to    *)
 (* fetch. The value "id" is a unique identifier for each GPU.              *)
 (***************************************************************************)
 \* Assuming that the request will not be lost.
-Subscribe_GPU == /\ Gpu.state = "idle"
-                 /\ logical_segments[Gpu.id] = <<>>       
-                 /\ LET msg == [id |-> Gpu.id, numData |-> Gpu.missing_data] IN
+Subscribe_GPU == /\ \E gpu_id \in 1..N_KGPU : 
+                    /\ KGpus[gpu_id].state = "idle"
+                    /\ logical_segments[gpu_id] = <<>>       
+                    /\ LET msg == [id |-> gpu_id, numData |-> KGpus[gpu_id].missing_data] IN
                       /\ PushChannel' = Append(PushChannel, msg)
-                 /\ UNCHANGED <<logical_segments, Cpu, Data, Gpu>>
+                      /\ KGpus' = [KGpus EXCEPT ![gpu_id].state = "requesting"]
+                 /\ UNCHANGED <<logical_segments, Cpu, Data>>
+                 
 
 (***************************************************************************)
-(* Action RcvData_GPU defines the GPU transitioning to "working" state.    *)
-(* The GPU accessing the first element of its respective buffer,           *)
-(* storing it in its own buffer, and removing it from its buffer.          *)
+(* Action RcvACK_GPU defines a GPU receiving the ack form the cpu          *)
+(* transitioning to "waiting" state.                                       *)
+(***************************************************************************)                 
+RcvACK_GPU == /\ \E gpu_id \in 1..N_KGPU : 
+                    /\ KGpus[gpu_id].state = "requesting"
+                    /\ logical_segments[gpu_id] # <<>>
+                    /\ LET required_data == Head(logical_segments[gpu_id]) IN
+                        /\ KGpus' = [KGpus EXCEPT ![gpu_id].state = "waiting"] 
+                    /\ logical_segments' = [logical_segments EXCEPT ![gpu_id] = Tail(@)]               
+                    /\ UNCHANGED <<Cpu, Data, PushChannel>>
+
 (***************************************************************************)
-RcvData_GPU ==  /\ Gpu.state \in {"idle","waiting"}
-                /\ logical_segments[Gpu.id] # <<>>
-                /\ LET required_data == Head(logical_segments[Gpu.id]) IN
-                    IF (required_data > ACK) THEN
-                        /\ Gpu' = [Gpu EXCEPT !.buffer = Append(Gpu.buffer, required_data), !.state = "working", !.missing_data = @ - 1]                 
-                    ELSE 
-                        /\ Gpu' = [Gpu EXCEPT !.state = "working"]
-                /\ logical_segments' = [logical_segments EXCEPT ![Gpu.id] = Tail(@)]
-                /\ UNCHANGED <<Cpu, Data, PushChannel>>
+(* Action RcvData_GPU defines a GPU transitioning to "working" state.      *)
+(* The GPU accessing the first element of its respective memory,           *)
+(* storing it in its own memory, and removing it from the logica segment.  *)
+(***************************************************************************)
+RcvData_GPU ==  /\ \E gpu_id \in 1..N_KGPU :
+                    /\ KGpus[gpu_id].state = "waiting"
+                    /\ logical_segments[gpu_id] # <<>>
+                    /\ LET required_data == Head(logical_segments[gpu_id]) IN
+                            /\ KGpus' = [KGpus EXCEPT 
+                                            ![gpu_id].memory = Append(KGpus[gpu_id].memory, required_data), 
+                                            ![gpu_id].state = "working", 
+                                            ![gpu_id].missing_data = @ - 1]                 
+                    /\ logical_segments' = [logical_segments EXCEPT ![gpu_id] = Tail(@)]
+                    /\ UNCHANGED <<Cpu, Data, PushChannel>>
 
 (***************************************************************************)
 (* Action Waiting_GPU signals a GPU which is waiting for the data.         *)
 (***************************************************************************)
-Waiting_GPU ==  /\ Gpu.state \in {"working"}
-                /\ Gpu' = [Gpu EXCEPT !.state = "waiting"]
-                /\ UNCHANGED <<logical_segments, Cpu, Data, PushChannel>>
+Waiting_GPU ==  /\ \E gpu_id \in 1..N_KGPU :
+                    /\ KGpus[gpu_id].state = "working"
+                    /\ KGpus' = [KGpus EXCEPT ![gpu_id].state = "waiting"]
+                    /\ UNCHANGED <<logical_segments, Cpu, Data, PushChannel>>
 
 (***************************************************************************)
 (* Next defines the possible next actions in the system.                   *)
@@ -192,6 +251,7 @@ Next ==     \/ ReceiveMsg_CPU
             \/ SendData_CPU 
             \/ Idle_CPU 
             \/ Subscribe_GPU 
+            \/ RcvACK_GPU
             \/ RcvData_GPU 
             \/ Waiting_GPU
 
@@ -209,8 +269,8 @@ FairSpec == Spec /\ WF_vars(Next)
 
 (***************************************************************************)
 (* Define the temporal property that eventually all data will be in the    *)
-(* GPU buffer.                                                             *)
+(* GPU memory.                                                             *)
 (***************************************************************************)
-AllDataInGpu == <> (\A gpu_id \in 1..N_KGPU : logical_segments[gpu_id] = <<>> /\ Gpu.buffer # <<>>)
+AllDataInGpu == <> (\A gpu_id \in 1..N_KGPU : logical_segments[gpu_id] = <<>> /\ KGpus[gpu_id].memory # <<>>)
 
 ==========================================================================
