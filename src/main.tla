@@ -3,7 +3,7 @@ EXTENDS Integers, Sequences
 
 VARIABLES Data,      \* The set of all possible data values.
           Cpu,       \* The record containing the state and the value.
-          Buffer,    \* The buffer where the CPU will put the value.
+          logical_segments,    \* The map of buffers keyed by gpu_id.
           Gpu,       \* The record representing the GPU entity.
           PushChannel \* One way message channel from GPU to CPU.
 
@@ -11,7 +11,8 @@ CONSTANTS NULL,      \* Placeholder for the empty value
           ACK,      \* Placeholder for the ack value
           StatesCpu, \* The set of all possible CPU states
           StatesGpu, \* The set of all possible GPU states
-          MAX_INT_VALUE \* The ceiling for all data values
+          MAX_INT_VALUE, \* The ceiling for all data values
+          N_KGPU
 
 -------------------------------------------------------------------------
 (***************************************************************************)
@@ -41,7 +42,8 @@ RemoveFromSeq(elem, seq) ==
 (* Cpu is a record with a state in StatesCpu, a value in Data or NULL,     *)
 (* a subscription map with keys as GPU IDs and values as the remaining     *)
 (* data, and a sequence of subscribed GPU IDs.                             *)
-(* Buffer is a sequence of elements from Data or is empty.                 *)
+(* logical_segments is a map where keys are GPU IDs and values are sequences*)
+(* of elements from Data or are empty.                                     *)
 (* Gpu is a record with an ID, a state in StatesGpu, a counter for         *)
 (* the amount of data needed, and a buffer to store its values.            *)
 (* PushChannel is a sequence of messages from GPU to CPU or is empty.      *)
@@ -54,26 +56,26 @@ TypeOK == /\ Cpu \in [  state : StatesCpu,
                         state : StatesGpu, 
                         missing_data : Int,     
                         buffer : {ACK} \cup Seq(Data)]     
-          /\ Buffer \in <<>> \cup Seq(Data)
+          /\ logical_segments \in [Int -> {ACK} \cup Seq(Data)]
           /\ PushChannel \in <<>> \cup Seq([id : Int, numData : Int])
           /\ StatesCpu = {"processing", "fetching", "sending", "idle"}
           /\ StatesGpu = {"idle", "requesting", "working", "waiting"}
 
-vars == << Data, Cpu, Buffer, Gpu, PushChannel >>
+vars == << Data, Cpu, logical_segments, Gpu, PushChannel >>
 
 (***************************************************************************)
 (* Initially, Data is a set of natural numbers up to MAX_INT_VALUE,       *)
 (* StatesCpu contains the possible states, the CPU is in the "idle" state  *)
-(* with no value and an empty subscription map and list, Buffer is empty,  *)
-(* Gpu is idle with ID 1 and needs a random number of data items within    *)
-(* 1 to MAX_INT_VALUE, and an empty buffer, and PushChannel is empty.      *)
+(* with no value and an empty subscription map and list, logical_segments  *)
+(* is empty, Gpu is idle with ID 1 and needs a random number of data items *)
+(* within 1 to MAX_INT_VALUE, and an empty buffer, and PushChannel is empty. *)
 (***************************************************************************)
 Init == /\ Data = ACK + 1..MAX_INT_VALUE
         /\ Cpu = [  state |-> "idle", 
                     value |-> NULL, 
-                    subs_map |-> [i \in 1..MAX_INT_VALUE |-> 0], 
+                    subs_map |-> [i \in 1..N_KGPU |-> 0], 
                     subs_list |-> <<>>]
-        /\ Buffer = <<>>
+        /\ logical_segments = [i \in 1..N_KGPU |-> <<>>]
         /\ Gpu = [  id |-> 1, 
                     state |-> "idle", 
                     missing_data |-> CHOOSE x \in 3..MAX_INT_VALUE : TRUE, 
@@ -97,7 +99,7 @@ ReceiveMsg_CPU == /\ Cpu.state = "idle"
                                 !.subs_map[msg.id] = msg.numData, 
                                 !.subs_list = Append(Cpu.subs_list, msg.id)]
                     /\ PushChannel' = Tail(PushChannel)
-                    /\ Buffer' = Append(Buffer, ACK)
+                    /\ logical_segments' = [logical_segments EXCEPT ![msg.id] = Append(@, ACK)]
                   /\ UNCHANGED <<Gpu, Data>>
 
 (***************************************************************************)
@@ -112,7 +114,7 @@ FetchData_CPU ==    /\ Cpu.state = "idle"
                         /\ Cpu.value = NULL
                     /\ LET d == CHOOSE x \in Data : TRUE IN
                         /\ Cpu' = [Cpu EXCEPT !.state = "fetching", !.value = d]
-                    /\ UNCHANGED <<Buffer, Gpu, Data, PushChannel>>
+                    /\ UNCHANGED <<logical_segments, Gpu, Data, PushChannel>>
 
 (***************************************************************************)
 (* Action SendData_CPU defines the CPU transitioning to the state "sending".*)
@@ -127,9 +129,9 @@ SendData_CPU ==
                 /\ LET gpu_id == Head(Cpu.subs_list) IN
                     IF (Cpu.subs_map[gpu_id] = 0) THEN 
                         /\ Cpu'.subs_list = Tail(Cpu.subs_list)
-                        /\ UNCHANGED <<Gpu, PushChannel, Data, Buffer, Cpu.state, Cpu.value, Cpu.subs_map>>
+                        /\ UNCHANGED <<Gpu, PushChannel, Data, logical_segments, Cpu.state, Cpu.value, Cpu.subs_map>>
                     ELSE
-                        /\ Buffer' = Append(Buffer, Cpu.value)
+                        /\ logical_segments' = [logical_segments EXCEPT ![gpu_id] = Append(@, Cpu.value)]
                         /\ Cpu' = 
                             [ Cpu EXCEPT 
                                 !.state = "sending", 
@@ -144,7 +146,7 @@ SendData_CPU ==
 (***************************************************************************)
 Idle_CPU ==    /\ Cpu.state \in {"fetching", "sending", "processing"}
                /\ Cpu' = [Cpu EXCEPT !.state = "idle"]
-               /\ UNCHANGED <<Buffer, Gpu, Data, PushChannel>>
+               /\ UNCHANGED <<logical_segments, Gpu, Data, PushChannel>>
 
 (***************************************************************************)
 (* Action Subscribe_GPU defines the GPU sending a message to the CPU and   *)
@@ -155,24 +157,24 @@ Idle_CPU ==    /\ Cpu.state \in {"fetching", "sending", "processing"}
 (***************************************************************************)
 \* Assuming that the request will not be lost.
 Subscribe_GPU == /\ Gpu.state = "idle"
-                 /\ Buffer = <<>>       
+                 /\ logical_segments[Gpu.id] = <<>>       
                  /\ LET msg == [id |-> Gpu.id, numData |-> Gpu.missing_data] IN
                       /\ PushChannel' = Append(PushChannel, msg)
-                 /\ UNCHANGED <<Buffer, Cpu, Data, Gpu>>
+                 /\ UNCHANGED <<logical_segments, Cpu, Data, Gpu>>
 
 (***************************************************************************)
 (* Action RcvData_GPU defines the GPU transitioning to "working" state.    *)
-(* The GPU accessing the first element of the Buffer,                      *)
-(* storing it in its own buffer, and removing it from the Buffer.          *)
+(* The GPU accessing the first element of its respective buffer,           *)
+(* storing it in its own buffer, and removing it from its buffer.          *)
 (***************************************************************************)
 RcvData_GPU ==  /\ Gpu.state \in {"idle","waiting"}
-                /\ Buffer # <<>>
-                /\ LET required_data == Head(Buffer) IN
+                /\ logical_segments[Gpu.id] # <<>>
+                /\ LET required_data == Head(logical_segments[Gpu.id]) IN
                     IF (required_data > ACK) THEN
                         /\ Gpu' = [Gpu EXCEPT !.buffer = Append(Gpu.buffer, required_data), !.state = "working", !.missing_data = @ - 1]                 
                     ELSE 
                         /\ Gpu' = [Gpu EXCEPT !.state = "working"]
-                /\ Buffer' = Tail(Buffer)
+                /\ logical_segments' = [logical_segments EXCEPT ![Gpu.id] = Tail(@)]
                 /\ UNCHANGED <<Cpu, Data, PushChannel>>
 
 (***************************************************************************)
@@ -180,7 +182,7 @@ RcvData_GPU ==  /\ Gpu.state \in {"idle","waiting"}
 (***************************************************************************)
 Waiting_GPU ==  /\ Gpu.state \in {"working"}
                 /\ Gpu' = [Gpu EXCEPT !.state = "waiting"]
-                /\ UNCHANGED <<Buffer, Cpu, Data, PushChannel>>
+                /\ UNCHANGED <<logical_segments, Cpu, Data, PushChannel>>
 
 (***************************************************************************)
 (* Next defines the possible next actions in the system.                   *)
@@ -209,6 +211,6 @@ FairSpec == Spec /\ WF_vars(Next)
 (* Define the temporal property that eventually all data will be in the    *)
 (* GPU buffer.                                                             *)
 (***************************************************************************)
-AllDataInGpu == <> (Buffer = <<>> /\ Gpu.buffer # <<>>)
+AllDataInGpu == <> (\A gpu_id \in 1..N_KGPU : logical_segments[gpu_id] = <<>> /\ Gpu.buffer # <<>>)
 
 ==========================================================================
