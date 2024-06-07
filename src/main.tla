@@ -1,106 +1,107 @@
 ------------------------------ MODULE main ------------------------------
 EXTENDS Integers, Sequences
 
-VARIABLES Data,      \* The set of all possible data values.
-          Cpu,       \* The record containing the state and the value.
-          logical_segments,    \* The map of memorys keyed by gpu_id.
+VARIABLES Cpu,       \* The record containing the state and the value.
+          Streamlets,
+          LogicalSegments,    \* The map of memorys keyed by gpu_id.
           KGpus,      \* The record representing the KGpus entities.
           PushChannel \* One way message channel from GPU to CPU.
-
+          
 CONSTANTS NULL,      \* Placeholder for the empty value
           ACK,       \* Placeholder for the ack value
-          StatesCpu, \* The set of all possible CPU states
-          StatesGpu, \* The set of all possible GPU states
           MAX_INT_VALUE, \* The ceiling for all data values
-          N_KGPU
-
--------------------------------------------------------------------------
+          N_KGPU,    \* Number of KGpus
+          N_STREAMLETS, \* Number of streamlets
+          IntType \* The set of all possible data values (0..MAX_INT_VALUE)
+          
 (***************************************************************************)
-(* Helper function to check if an element is not in a sequence.            *)
+(* Type definition for Cpu.                                                *)
 (***************************************************************************)
-NotInSeq(elem, seq) == \A i \in 1..Len(seq) : elem # seq[i]
-
-(***************************************************************************)
-(* Helper function to find the index of an element in a sequence.          *)
-(***************************************************************************)
-IndexOf(elem, seq) == 
-    CHOOSE i \in 1..Len(seq) : seq[i] = elem
+CpuType == [ state : {"idle", "processing", "computing", "sending"},
+             value : {NULL} \cup Int,
+             subs : Seq([kgpu_id : 0..N_KGPU, required_data : IntType]) ]
 
 (***************************************************************************)
-(* Helper function to remove the first occurrence of an element            *)
-(* from a sequence.                                                        *)
+(* Type definition for LogicalSegments.                                   *)
 (***************************************************************************)
-RemoveFromSeq(elem, seq) == 
-    IF ~ \E i \in 1..Len(seq) : seq[i] = elem THEN seq
-    ELSE [i \in 1..(Len(seq) - 1) |-> 
-            IF i < IndexOf(elem, seq) THEN seq[i]
-            ELSE seq[i + 1]
-         ]
-
---------------------------------------------------------------------------------------------
+LogicalSegmentsType == [0..N_KGPU -> Seq({ACK} \cup IntType)]
 
 (***************************************************************************)
-(* TypeOK defines the types of the variables to ensure their correctness.  *)
-(* - Data: A set of integers within the range 0 to MAX_INT_VALUE excluding ACK. *)
-(* - Cpu: A record with fields:                                              *)
-(*   - state: Represents the state of the CPU, which can be "idle",          *)
-(*     "processing", "fetching", or "sending".                               *)
-(*   - value: Can be NULL or an integer within the range 0 to MAX_INT_VALUE  *)
-(*     excluding ACK.                                                        *)
-(*   - subs: A sequence of records with fields:                              *)
-(*     - kgpu_id: An identifier within the range 1 to N_KGPU.                *)
-(*     - segment_to_stream: An integer within the range 0 to MAX_INT_VALUE.  *)
-(* - logical_segments: A mapping from each KGPU to a sequence of elements    *)
-(*   that can be ACK or in Data.                                             *)
-(* - KGpus: A mapping from each KGPU to a record with fields:                *)
-(*   - id: An identifier within the range 1 to N_KGPU.                       *)
-(*   - state: Represents the state of the GPU, which can be "idle",          *)
-(*     "requesting", "working", or "waiting".                                *)
-(*   - missing_data: An integer within the range 0 to MAX_INT_VALUE.         *)
-(*   - memory: A sequence of elements in Data.                               *)
-(* - PushChannel: A sequence of records, each containing:                    *)
-(*   - id: An identifier within the range 1 to N_KGPU.                       *)
-(*   - numData: An integer within the range 0 to MAX_INT_VALUE.              *)
+(* Type definition for a KGpu.                                             *)
 (***************************************************************************)
-TypeOK == /\ Data \subseteq 0..MAX_INT_VALUE
-          /\ NULL \notin Data
-          /\ ACK \notin Data
-          /\ Cpu \in [ state : {"idle", "processing", "fetching", "sending"},
-                      value : {NULL} \cup (0..MAX_INT_VALUE),
-                      subs : Seq([kgpu_id : 0..N_KGPU, segment_to_stream : 0..MAX_INT_VALUE]) ]
-          /\ logical_segments \in [0..N_KGPU -> Seq({ACK} \cup Data)]
-          /\ KGpus \in [0..N_KGPU -> [ id : 0..N_KGPU,
-                                      state : {"idle", "requesting", "working", "waiting"},
-                                      missing_data : 0..MAX_INT_VALUE,
-                                      memory : Seq(Data) ]]
-          /\ PushChannel \in Seq([id : 0..N_KGPU, numData : 0..MAX_INT_VALUE])
+KGpuType == [ id : 0..N_KGPU,
+              state : {"idle", "requesting", "working", "waiting"},
+              missing_data : IntType,
+              memory : Seq(IntType) ]
 
-vars == << Data, Cpu, logical_segments, KGpus, PushChannel >>
+(***************************************************************************)
+(* Type definition for the collection of KGpus.                            *)
+(***************************************************************************)
+KGpusType == [0..N_KGPU -> KGpuType]
+
+(***************************************************************************)
+(* Type definition for PushChannel.                                        *)
+(***************************************************************************)
+PushChannelType == Seq([id : 0..N_KGPU, numData : IntType])
+
+(***************************************************************************)
+(* Type definition for a streamlet.                                        *)
+(***************************************************************************)
+StreamletType == [ start_address : Int,
+                   stop_address : Int,
+                   kgpu_id : Int,
+                   current_address : Int ]
+
+(***************************************************************************)
+(* Type definition for the collection of streamlets.                       *)
+(***************************************************************************)
+StreamletsType == [0..N_STREAMLETS -> StreamletType]
+
+(***************************************************************************)
+(* TypeOK *)
+(***************************************************************************)
+TypeOK == /\ NULL \notin IntType
+          /\ ACK \notin IntType
+          /\ Cpu \in CpuType
+          /\ Streamlets \in StreamletsType
+          /\ LogicalSegments \in LogicalSegmentsType
+          /\ KGpus \in KGpusType
+          /\ PushChannel \in PushChannelType
+
+vars == << Cpu, Streamlets, LogicalSegments, KGpus, PushChannel>>
 
 (***************************************************************************)
 (* Init defines the initial state of the system.                           *)
-(* - Data: Initialized to the range from 0 to MAX_INT_VALUE excluding ACK. *)
+(* - IntType: Initialized to the range from 0 to MAX_INT_VALUE excluding ACK. *)
 (* - Cpu: Initialized with:                                                *)
 (*   - state: Set to "idle".                                               *)
 (*   - value: Set to NULL.                                                 *)
 (*   - subs: An empty sequence.                                            *)
-(* - logical_segments: Each KGPU is mapped to an empty sequence.           *)
+(* - LogicalSegments: Each KGPU is mapped to an empty sequence.           *)
 (* - KGpus: Each KGPU is initialized with:                                 *)
 (*   - id: Set to its corresponding identifier.                            *)
 (*   - state: Set to "idle".                                               *)
-(*   - missing_data: Set to a value chosen within the range 0 to           *)
-(*     MAX_INT_VALUE.                                                      *)
+(*   - missing_data: Set to a value chosen within the range 3 to           *)
+(*     MAX_INT_VALUE, excluding 0.                                         *)
 (*   - memory: An empty sequence.                                          *)
 (* - PushChannel: Initialized to an empty sequence.                       *)
+(* - streamlets: Each streamlet is initialized with:                       *)
+(*   - start_address: Set to 0.                                            *)
+(*   - stop_address: Set to 0.                                             *)
+(*   - kgpu_id: Set to 0.                                                  *)
+(*   - current_address: Set to 1.                                          *)
 (***************************************************************************)
-Init == /\ Data = {d \in 0..MAX_INT_VALUE : d # ACK}
-        /\ Cpu = [ state |-> "idle", 
+Init == /\ Cpu = [ state |-> "idle", 
                    value |-> NULL, 
                    subs |-> <<>> ]
-        /\ logical_segments = [i \in 0..N_KGPU |-> <<>>]
+        /\ Streamlets = [i \in 0..N_STREAMLETS |-> [ start_address |-> 0, 
+                                                     stop_address |-> 0, 
+                                                     kgpu_id |-> 0,
+                                                     current_address |-> 1 ]]
+        /\ LogicalSegments = [i \in 0..N_KGPU |-> <<>>]
         /\ KGpus = [i \in 0..N_KGPU |-> [ id |-> i, 
                                           state |-> "idle", 
-                                          missing_data |-> CHOOSE x \in 3..MAX_INT_VALUE : x # 0, 
+                                          missing_data |-> CHOOSE x \in 0..MAX_INT_VALUE : x > 2, 
                                           memory |-> <<>>]]
         /\ PushChannel = <<>>
 
@@ -113,52 +114,52 @@ Init == /\ Data = {d \in 0..MAX_INT_VALUE : d # ACK}
 (*   - state: Set to "processing".                                         *)
 (*   - subs: Appends a record with msg.id and msg.numData.                 *)
 (* - PushChannel': The read message gets removed.                         *)
-(* - logical_segments': The segment for msg.id is updated by appending ACK.*)
+(* - LogicalSegments': The segment for msg.id is updated by appending ACK.*)
 (***************************************************************************)
 ReceiveMsg_CPU == /\ Cpu.state = "idle"
                   /\ PushChannel # <<>>
                   /\ LET msg == Head(PushChannel) IN
                     /\ Cpu' = [Cpu EXCEPT 
                                 !.state = "processing", 
-                                !.subs = Append(Cpu.subs, [kgpu_id |-> msg.id, segment_to_stream |-> msg.numData])]
+                                !.subs = Append(Cpu.subs, [kgpu_id |-> msg.id, required_data |-> msg.numData])]
                     /\ PushChannel' = Tail(PushChannel)
-                    /\ logical_segments' = [logical_segments EXCEPT ![msg.id] = Append(@, ACK)]
-                  /\ UNCHANGED <<KGpus, Data>>
+                    /\ LogicalSegments' = [LogicalSegments EXCEPT ![msg.id] = Append(@, ACK)]
+                  /\ UNCHANGED <<KGpus, Streamlets>>
 
 (***************************************************************************)
-(* FetchData_CPU defines the conditions and actions for fetching data by the CPU. *)
+(* ComputeDataLocation_CPU defines the conditions and actions for computing data by the CPU. *)
 (* - Cpu:                                                                  *)
 (*   - state: Must be "idle".                                              *)
 (*   - subs: Must not be empty.                                            *)
 (*   - value: Must be NULL.                                                *)
 (* - kgpu_id: The head of Cpu.subs.                                        *)
-(*   - segment_to_stream: The segment to be streamed.                      *)
+(*   - required_data: The segment to be streamed.                      *)
 (*   - Cpu.subs: The entry for kgpu_id is checked.                         *)
-(*   - d: Chosen from Data.                                                *)
+(*   - d: Chosen from IntType.                                             *)
 (*   - Cpu': Updated with:                                                 *)
-(*     - state: Set to "fetching".                                         *)
+(*     - state: Set to "computing".                                         *)
 (*     - value: Set to d.                                                  *)
 (***************************************************************************)
-FetchData_CPU == 
+ComputeDataLocation_CPU == 
         /\ Cpu.state = "idle"
         /\ Cpu.subs # <<>>
         /\ Cpu.value = NULL
         /\ LET sub == Head(Cpu.subs) IN
-            IF sub.segment_to_stream # 0 THEN 
-                /\ LET d == CHOOSE x \in Data : TRUE IN
-                    /\ Cpu' = [Cpu EXCEPT !.state = "fetching", !.value = d]
-                /\ UNCHANGED <<logical_segments, KGpus, Data, PushChannel>>
+            IF sub.required_data # 0 THEN 
+                /\ LET d == CHOOSE x \in IntType : TRUE  IN
+                    /\ Cpu' = [Cpu EXCEPT !.state = "computing", !.value = d]
+                /\ UNCHANGED <<LogicalSegments, KGpus, IntType, PushChannel, Streamlets>>
             ELSE
                 /\ Cpu' = [Cpu EXCEPT !.subs = Tail(@)]
-                /\ UNCHANGED <<KGpus, PushChannel, Data, logical_segments, Cpu.state, Cpu.value>>
+                /\ UNCHANGED <<KGpus, PushChannel, LogicalSegments, Cpu.state, Cpu.value, Streamlets>>
 
 (***************************************************************************)
-(* SendData_CPU defines the transition for sending data by the CPU.        *)
+(* StartStream_CPU defines the transition for sending data by the CPU.        *)
 (* - Cpu.state: Must be "idle".                                            *)
 (* - Cpu.value: Must not be NULL.                                          *)
 (* - LET sub: The first element in Cpu.subs.                               *)
-(*   - If sub.segment_to_stream = 0:                                       *)
-(*     - Then the KGPU gets unsuscribed since all data has been delivered. *)
+(*   - If sub.required_data = 0:                                           *)
+(*     - Then the KGPU gets unsubscribed since all data has been delivered. *)
 (*   - ELSE:                                                               *)
 (*     - Send the data to the KGPU                                         *)
 (*     - Cpu':                                                             *)
@@ -166,25 +167,42 @@ FetchData_CPU ==
 (*       - value: Set to NULL.                                             *)
 (*       - subs: The entry for kgpu_id is updated.                         *)
 (***************************************************************************)
-SendData_CPU == 
+StartStream_CPU == 
     /\ Cpu.state = "idle"
     /\ Cpu.value # NULL
-    /\ LET sub == Head(Cpu.subs) IN
-        /\ logical_segments' = [logical_segments EXCEPT ![sub.kgpu_id] = Append(@, Cpu.value)]
-        /\ Cpu' = 
-            [ Cpu EXCEPT 
-                !.state = "sending", 
-                !.value = NULL,
-                !.subs = Append(Tail(@), [kgpu_id |-> sub.kgpu_id, segment_to_stream |-> sub.segment_to_stream - 1])
-            ]
-    /\ UNCHANGED <<KGpus, PushChannel, Data>>
+    /\ \E s \in DOMAIN Streamlets : Streamlets[s].current_address >= Streamlets[s].stop_address
+    /\ LET streamlet == CHOOSE s \in DOMAIN Streamlets : Streamlets[s].current_address >= Streamlets[s].stop_address IN
+        /\ LET sub == Head(Cpu.subs) IN
+            /\ Streamlets' = [Streamlets EXCEPT 
+                                ![streamlet].start_address = Cpu.value,
+                                ![streamlet].stop_address = Cpu.value + sub.required_data,
+                                ![streamlet].kgpu_id = sub.kgpu_id,
+                                ![streamlet].current_address = Cpu.value]
+            /\ Cpu' = [Cpu EXCEPT 
+                        !.state = "sending", 
+                        !.value = NULL,
+                        !.subs = Tail(@)
+                      ]
+    /\ UNCHANGED <<KGpus, PushChannel, LogicalSegments>>
 
 (***************************************************************************)
 (* Action Idle_CPU makes the CPU idle after every action.                  *)
 (***************************************************************************)
-Idle_CPU ==    /\ Cpu.state \in {"fetching", "sending", "processing"}
+Idle_CPU ==    /\ Cpu.state \in {"computing", "sending", "processing"}
                /\ Cpu' = [Cpu EXCEPT !.state = "idle"]
-               /\ UNCHANGED <<logical_segments, KGpus, Data, PushChannel>>
+               /\ UNCHANGED <<LogicalSegments, KGpus, PushChannel, Streamlets>>
+               
+
+(* Define a stream if there exists a streamlet that is in the streaming state *)
+Stream ==  
+    /\ \E s \in DOMAIN Streamlets : Streamlets[s].current_address < Streamlets[s].stop_address
+    /\ LET streamlet == CHOOSE s \in DOMAIN Streamlets : Streamlets[s].current_address < Streamlets[s].stop_address IN
+        /\ LET data == CHOOSE x \in IntType : TRUE IN
+            /\ LogicalSegments' = [LogicalSegments EXCEPT ![Streamlets[streamlet].kgpu_id] = Append(LogicalSegments[Streamlets[streamlet].kgpu_id], data)]
+            /\ Streamlets' = 
+                [Streamlets EXCEPT 
+                    ![streamlet].current_address = Streamlets[streamlet].current_address + 1]
+    /\ UNCHANGED <<Cpu, KGpus, PushChannel>>
 
 (***************************************************************************)
 (* Action Subscribe_GPU defines a GPU sending a message to the CPU and     *)
@@ -196,11 +214,11 @@ Idle_CPU ==    /\ Cpu.state \in {"fetching", "sending", "processing"}
 \* Assuming that the request will not be lost.
 Subscribe_GPU == /\ \E gpu_id \in 1..N_KGPU : 
                     /\ KGpus[gpu_id].state = "idle"
-                    /\ logical_segments[gpu_id] = <<>>       
+                    /\ LogicalSegments[gpu_id] = <<>>       
                     /\ LET msg == [id |-> gpu_id, numData |-> KGpus[gpu_id].missing_data] IN
                       /\ PushChannel' = Append(PushChannel, msg)
                       /\ KGpus' = [KGpus EXCEPT ![gpu_id].state = "requesting"]
-                 /\ UNCHANGED <<logical_segments, Cpu, Data>>
+                 /\ UNCHANGED <<LogicalSegments, Cpu, Streamlets>>
 
 (***************************************************************************)
 (* Action RcvACK_GPU defines a GPU receiving the ack form the cpu          *)
@@ -208,11 +226,11 @@ Subscribe_GPU == /\ \E gpu_id \in 1..N_KGPU :
 (***************************************************************************)                 
 RcvACK_GPU == /\ \E gpu_id \in 1..N_KGPU : 
                     /\ KGpus[gpu_id].state = "requesting"
-                    /\ logical_segments[gpu_id] # <<>>
-                    /\ LET required_data == Head(logical_segments[gpu_id]) IN
+                    /\ LogicalSegments[gpu_id] # <<>>
+                    /\ LET required_data == Head(LogicalSegments[gpu_id]) IN
                         /\ KGpus' = [KGpus EXCEPT ![gpu_id].state = "waiting"] 
-                    /\ logical_segments' = [logical_segments EXCEPT ![gpu_id] = Tail(@)]               
-                    /\ UNCHANGED <<Cpu, Data, PushChannel>>
+                    /\ LogicalSegments' = [LogicalSegments EXCEPT ![gpu_id] = Tail(@)]               
+                    /\ UNCHANGED <<Cpu, PushChannel, Streamlets>>
 
 (***************************************************************************)
 (* Action RcvData_GPU defines a GPU transitioning to "working" state.      *)
@@ -221,14 +239,14 @@ RcvACK_GPU == /\ \E gpu_id \in 1..N_KGPU :
 (***************************************************************************)
 RcvData_GPU ==  /\ \E gpu_id \in 1..N_KGPU :
                     /\ KGpus[gpu_id].state = "waiting"
-                    /\ logical_segments[gpu_id] # <<>>
-                    /\ LET required_data == Head(logical_segments[gpu_id]) IN
+                    /\ LogicalSegments[gpu_id] # <<>>
+                    /\ LET required_data == Head(LogicalSegments[gpu_id]) IN
                             /\ KGpus' = [KGpus EXCEPT 
                                             ![gpu_id].memory = Append(KGpus[gpu_id].memory, required_data), 
                                             ![gpu_id].state = "working", 
                                             ![gpu_id].missing_data = @ - 1]                 
-                    /\ logical_segments' = [logical_segments EXCEPT ![gpu_id] = Tail(@)]
-                    /\ UNCHANGED <<Cpu, Data, PushChannel>>
+                    /\ LogicalSegments' = [LogicalSegments EXCEPT ![gpu_id] = Tail(@)]
+                    /\ UNCHANGED <<Cpu, PushChannel, Streamlets>>
 
 (***************************************************************************)
 (* Action Waiting_GPU signals a GPU which is waiting for the data.         *)
@@ -236,15 +254,16 @@ RcvData_GPU ==  /\ \E gpu_id \in 1..N_KGPU :
 Waiting_GPU ==  /\ \E gpu_id \in 1..N_KGPU :
                     /\ KGpus[gpu_id].state = "working"
                     /\ KGpus' = [KGpus EXCEPT ![gpu_id].state = "waiting"]
-                    /\ UNCHANGED <<logical_segments, Cpu, Data, PushChannel>>
+                    /\ UNCHANGED <<LogicalSegments, Cpu, PushChannel, Streamlets>>
 
 (***************************************************************************)
 (* Next defines the possible next actions in the system.                   *)
 (***************************************************************************)
 Next ==     \/ ReceiveMsg_CPU 
-            \/ FetchData_CPU 
-            \/ SendData_CPU 
+            \/ ComputeDataLocation_CPU 
+            \/ StartStream_CPU 
             \/ Idle_CPU 
+            \/ Stream
             \/ Subscribe_GPU 
             \/ RcvACK_GPU
             \/ RcvData_GPU 
@@ -266,6 +285,6 @@ FairSpec == Spec /\ WF_vars(Next)
 (* Define the temporal property that eventually all data will be in the    *)
 (* GPU memory.                                                             *)
 (***************************************************************************)
-AllDataInGpu == <> (\A gpu_id \in 1..N_KGPU : logical_segments[gpu_id] = <<>> /\ KGpus[gpu_id].memory # <<>>)
+AllDataInGpu == <> (\A gpu_id \in 1..N_KGPU : LogicalSegments[gpu_id] = <<>> /\ KGpus[gpu_id].memory # <<>>)
 
 ==========================================================================
