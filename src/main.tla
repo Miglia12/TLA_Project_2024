@@ -9,7 +9,6 @@ VARIABLES Cpu,       \* The record containing the state and the value.
           
 CONSTANTS NULL,      \* Placeholder for the empty value
           ACK,       \* Placeholder for the ack value
-          MAX_INT_VALUE, \* The ceiling for all data values
           N_KGPU,    \* Number of KGpus
           N_STREAMLETS, \* Number of streamlets
           IntType \* The set of all possible data values (0..MAX_INT_VALUE)
@@ -19,17 +18,17 @@ CONSTANTS NULL,      \* Placeholder for the empty value
 (***************************************************************************)
 CpuType == [ state : {"idle", "processing", "computing", "sending"},
              value : {NULL} \cup Int,
-             subs : Seq([kgpu_id : 0..N_KGPU, required_data : IntType]) ]
+             subs : Seq([kgpu_id : 1..N_KGPU, required_data : IntType]) ]
 
 (***************************************************************************)
 (* Type definition for LogicalSegments.                                   *)
 (***************************************************************************)
-LogicalSegmentsType == [0..N_KGPU -> Seq({ACK} \cup IntType)]
+LogicalSegmentsType == [1..N_KGPU -> Seq({ACK} \cup IntType)]
 
 (***************************************************************************)
 (* Type definition for a KGpu.                                             *)
 (***************************************************************************)
-KGpuType == [ id : 0..N_KGPU,
+KGpuType == [ id : 1..N_KGPU,
               state : {"idle", "requesting", "working", "waiting"},
               missing_data : IntType,
               memory : Seq(IntType) ]
@@ -37,25 +36,25 @@ KGpuType == [ id : 0..N_KGPU,
 (***************************************************************************)
 (* Type definition for the collection of KGpus.                            *)
 (***************************************************************************)
-KGpusType == [0..N_KGPU -> KGpuType]
+KGpusType == [1..N_KGPU -> KGpuType]
 
 (***************************************************************************)
 (* Type definition for PushChannel.                                        *)
 (***************************************************************************)
-PushChannelType == Seq([id : 0..N_KGPU, numData : IntType])
+PushChannelType == Seq([id : 1..N_KGPU, numData : IntType])
 
 (***************************************************************************)
 (* Type definition for a streamlet.                                        *)
 (***************************************************************************)
 StreamletType == [ start_address : Int,
                    stop_address : Int,
-                   kgpu_id : Int,
+                   kgpu_id : 1..N_KGPU,
                    current_address : Int ]
 
 (***************************************************************************)
 (* Type definition for the collection of streamlets.                       *)
 (***************************************************************************)
-StreamletsType == [0..N_STREAMLETS -> StreamletType]
+StreamletsType == [1..N_STREAMLETS -> StreamletType]
 
 (***************************************************************************)
 (* TypeOK *)
@@ -94,15 +93,15 @@ vars == << Cpu, Streamlets, LogicalSegments, KGpus, PushChannel>>
 Init == /\ Cpu = [ state |-> "idle", 
                    value |-> NULL, 
                    subs |-> <<>> ]
-        /\ Streamlets = [i \in 0..N_STREAMLETS |-> [ start_address |-> 0, 
+        /\ Streamlets = [i \in 1..N_STREAMLETS |-> [ start_address |-> 0, 
                                                      stop_address |-> 0, 
-                                                     kgpu_id |-> 0,
+                                                     kgpu_id |-> i,
                                                      current_address |-> 1 ]]
-        /\ LogicalSegments = [i \in 0..N_KGPU |-> <<>>]
-        /\ KGpus = [i \in 0..N_KGPU |-> [ id |-> i, 
-                                          state |-> "idle", 
-                                          missing_data |-> CHOOSE x \in 0..MAX_INT_VALUE : x > 2, 
-                                          memory |-> <<>>]]
+        /\ LogicalSegments = [i \in 1..N_KGPU |-> <<>>]
+        /\ KGpus = [i \in 1..N_KGPU |-> [ id |-> i, 
+                                state |-> "idle", 
+                                missing_data |-> CHOOSE x \in IntType : x > 2, 
+                                memory |-> <<>>]]
         /\ PushChannel = <<>>
 
 (***************************************************************************)
