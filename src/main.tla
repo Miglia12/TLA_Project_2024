@@ -11,8 +11,33 @@ CONSTANTS NULL,      \* Placeholder for the empty value
           ACK,       \* Placeholder for the ack value
           N_KGPU,    \* Number of KGpus
           N_STREAMLETS, \* Number of streamlets
-          IntType \* The set of all possible data values (0..MAX_INT_VALUE)
+          IntType, \* The set of all possible data values (0..MAX_INT_VALUE)
+          LOGICAL_SEGMENT_SIZE \* Number of slots in each logical segment
           
+--------------------------------------------------------------------------
+(***************************************************************************)
+(* FindFirstNullIdx                                                        *)
+(* Returns the index of the first occurrence of NULL or 0 if none is found.*)
+(***************************************************************************)
+FindFirstNullIdx(id, LogicalSegmentsMap) == 
+    LET segment == LogicalSegments[id] IN
+        IF \E idx \in 1..LOGICAL_SEGMENT_SIZE : segment[idx] = NULL
+        THEN CHOOSE idx \in 1..LOGICAL_SEGMENT_SIZE : segment[idx] = NULL
+        ELSE 0
+        
+        
+(***************************************************************************)
+(* FindFirstNonNullIdx                                                     *)
+(* Returns the index of the first occurrence of a non-NULL element or 0    *)
+(* if all elements are NULL.                                               *)
+(***************************************************************************)
+FindFirstNonNullIdx(id, LogicalSegmentsMap) == 
+    LET segment == LogicalSegmentsMap[id] IN
+        IF \E idx \in 1..LOGICAL_SEGMENT_SIZE : segment[idx] # NULL
+        THEN CHOOSE idx \in 1..LOGICAL_SEGMENT_SIZE : segment[idx] # NULL
+        ELSE 0
+--------------------------------------------------------------------------
+
 (***************************************************************************)
 (* Type definition for Cpu.                                                *)
 (***************************************************************************)
@@ -23,7 +48,7 @@ CpuType == [ state : {"idle", "processing", "computing", "sending"},
 (***************************************************************************)
 (* Type definition for LogicalSegments.                                   *)
 (***************************************************************************)
-LogicalSegmentsType == [1..N_KGPU -> Seq({ACK} \cup IntType)]
+LogicalSegmentsType == [1..N_KGPU -> [1..LOGICAL_SEGMENT_SIZE -> {ACK} \cup {NULL} \cup IntType]]
 
 (***************************************************************************)
 (* Type definition for a KGpu.                                             *)
@@ -97,11 +122,11 @@ Init == /\ Cpu = [ state |-> "idle",
                                                      stop_address |-> 0, 
                                                      kgpu_id |-> i,
                                                      current_address |-> 1 ]]
-        /\ LogicalSegments = [i \in 1..N_KGPU |-> <<>>]
+        /\ LogicalSegments = [i \in 1..N_KGPU |-> [j \in 1..LOGICAL_SEGMENT_SIZE |-> NULL]]
         /\ KGpus = [i \in 1..N_KGPU |-> [ id |-> i, 
-                                state |-> "idle", 
-                                missing_data |-> CHOOSE x \in IntType : x > 2, 
-                                memory |-> <<>>]]
+                                          state |-> "idle", 
+                                          missing_data |-> CHOOSE x \in IntType : x > 2, 
+                                          memory |-> <<>>]]
         /\ PushChannel = <<>>
 
 (***************************************************************************)
@@ -117,13 +142,15 @@ Init == /\ Cpu = [ state |-> "idle",
 (***************************************************************************)
 ReceiveMsg_CPU == /\ Cpu.state = "idle"
                   /\ PushChannel # <<>>
-                  /\ LET msg == Head(PushChannel) IN
-                    /\ Cpu' = [Cpu EXCEPT 
+                  /\ LET msg == Head(PushChannel) IN 
+                    LET idx == FindFirstNullIdx(msg.id, LogicalSegments) IN
+                        /\ idx > 0
+                        /\ Cpu' = [Cpu EXCEPT 
                                 !.state = "processing", 
                                 !.subs = Append(Cpu.subs, [kgpu_id |-> msg.id, required_data |-> msg.numData])]
-                    /\ PushChannel' = Tail(PushChannel)
-                    /\ LogicalSegments' = [LogicalSegments EXCEPT ![msg.id] = Append(@, ACK)]
-                  /\ UNCHANGED <<KGpus, Streamlets>>
+                        /\ LogicalSegments' = [LogicalSegments EXCEPT ![msg.id][idx] = ACK]
+                        /\ PushChannel' = Tail(PushChannel)
+                        /\ UNCHANGED <<KGpus, Streamlets>>
 
 (***************************************************************************)
 (* ComputeDataLocation_CPU defines the conditions and actions for computing data by the CPU. *)
@@ -196,8 +223,10 @@ Idle_CPU ==    /\ Cpu.state \in {"computing", "sending", "processing"}
 Stream ==  
     /\ \E s \in DOMAIN Streamlets : Streamlets[s].current_address < Streamlets[s].stop_address
     /\ LET streamlet == CHOOSE s \in DOMAIN Streamlets : Streamlets[s].current_address < Streamlets[s].stop_address IN
+        LET idx == FindFirstNullIdx(Streamlets[streamlet].kgpu_id, LogicalSegments) IN
+        /\ idx > 0  \* Check if there is a NULL position available
         /\ LET data == CHOOSE x \in IntType : TRUE IN
-            /\ LogicalSegments' = [LogicalSegments EXCEPT ![Streamlets[streamlet].kgpu_id] = Append(LogicalSegments[Streamlets[streamlet].kgpu_id], data)]
+            /\ LogicalSegments' = [LogicalSegments EXCEPT ![Streamlets[streamlet].kgpu_id][idx] = data]
             /\ Streamlets' = 
                 [Streamlets EXCEPT 
                     ![streamlet].current_address = Streamlets[streamlet].current_address + 1]
@@ -213,7 +242,7 @@ Stream ==
 \* Assuming that the request will not be lost.
 Subscribe_GPU == /\ \E gpu_id \in 1..N_KGPU : 
                     /\ KGpus[gpu_id].state = "idle"
-                    /\ LogicalSegments[gpu_id] = <<>>       
+                    /\ FindFirstNullIdx(gpu_id, LogicalSegments) > 0  \* Check if there is a NULL slot
                     /\ LET msg == [id |-> gpu_id, numData |-> KGpus[gpu_id].missing_data] IN
                       /\ PushChannel' = Append(PushChannel, msg)
                       /\ KGpus' = [KGpus EXCEPT ![gpu_id].state = "requesting"]
@@ -225,11 +254,13 @@ Subscribe_GPU == /\ \E gpu_id \in 1..N_KGPU :
 (***************************************************************************)                 
 RcvACK_GPU == /\ \E gpu_id \in 1..N_KGPU : 
                     /\ KGpus[gpu_id].state = "requesting"
-                    /\ LogicalSegments[gpu_id] # <<>>
-                    /\ LET required_data == Head(LogicalSegments[gpu_id]) IN
-                        /\ KGpus' = [KGpus EXCEPT ![gpu_id].state = "waiting"] 
-                    /\ LogicalSegments' = [LogicalSegments EXCEPT ![gpu_id] = Tail(@)]               
-                    /\ UNCHANGED <<Cpu, PushChannel, Streamlets>>
+                    /\ LET idx == FindFirstNonNullIdx(gpu_id, LogicalSegments) IN 
+                        /\ idx > 0  \* Ensure there's a non-NULL (i.e., ACK) present
+                        /\ LET required_data == LogicalSegments[gpu_id][idx] IN
+                             /\ KGpus' = [KGpus EXCEPT ![gpu_id].state = "waiting"] 
+                             /\ LogicalSegments' = [LogicalSegments EXCEPT 
+                                                     ![gpu_id][idx] = NULL]
+                             /\ UNCHANGED <<Cpu, PushChannel, Streamlets>>
 
 (***************************************************************************)
 (* Action RcvData_GPU defines a GPU transitioning to "working" state.      *)
@@ -238,14 +269,15 @@ RcvACK_GPU == /\ \E gpu_id \in 1..N_KGPU :
 (***************************************************************************)
 RcvData_GPU ==  /\ \E gpu_id \in 1..N_KGPU :
                     /\ KGpus[gpu_id].state = "waiting"
-                    /\ LogicalSegments[gpu_id] # <<>>
-                    /\ LET required_data == Head(LogicalSegments[gpu_id]) IN
-                            /\ KGpus' = [KGpus EXCEPT 
-                                            ![gpu_id].memory = Append(KGpus[gpu_id].memory, required_data), 
-                                            ![gpu_id].state = "working", 
+                    /\ LET idx == FindFirstNonNullIdx(gpu_id, LogicalSegments)
+                       IN /\ idx > 0  \* Ensure there's a non-NULL data element present
+                          /\ LET required_data == LogicalSegments[gpu_id][idx] IN
+                             /\ KGpus' = [KGpus EXCEPT 
+                                            ![gpu_id].memory = Append(KGpus[gpu_id].memory, required_data),
+                                            ![gpu_id].state = "working",
                                             ![gpu_id].missing_data = @ - 1]                 
-                    /\ LogicalSegments' = [LogicalSegments EXCEPT ![gpu_id] = Tail(@)]
-                    /\ UNCHANGED <<Cpu, PushChannel, Streamlets>>
+                             /\ LogicalSegments' = [LogicalSegments EXCEPT ![gpu_id][idx] = NULL]
+                             /\ UNCHANGED <<Cpu, PushChannel, Streamlets>>
 
 (***************************************************************************)
 (* Action Waiting_GPU signals a GPU which is waiting for the data.         *)
