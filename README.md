@@ -13,7 +13,7 @@ This specification defines the interactions between a CPU and a GPU in a simplif
 
 ## Setting Up TLC
 
-To configure the TLCmodel checker for efficient state exploration, set the constants as follows:
+To configure the TLC model checker set the constants as follows:
 
 - **NULL**: Represents an empty memory slot. Set this to a model value.
 - **ACK**: Serves as a placeholder for acknowledgment signal. Set this to a model value.
