@@ -5,6 +5,12 @@
 
 This specification defines the interactions between a CPU and a GPU in a simplified system where the CPU provides data to the GPU. The specification includes the state and behavior of both entities and the communication mechanism between them.
 
+## Repository Structure
+
+- **src/main.tla**: The main TLA+ specification file describing the system model.
+- **deliverables/first_design.jpg**: A sketch of the initial design implemented in the specification. (Note: Some elements may have changed since the initial design phase.)
+- **deliverables/Project_Abstract.pdf**: Contains the project abstract.
+
 ## Setting Up TLC
 
 To configure the TLCmodel checker for efficient state exploration, set the constants as follows:
@@ -63,9 +69,3 @@ A complete setup example should resemble the following.
 - **MemorySizeEqualsRequiredData**: Ensures each GPU in the "done" state has a memory load exactly matching the initially requested data.
 - **CorrectMemoryUtilization**: Guarantees that upon reaching the "done" state, each GPU has processed all required data, correctly stored in memory, with associated logical segments cleared.
 - **CorrectStreamletAssignment**: Prevents overlap and conflicts in GPU servicing by ensuring each streamlet is uniquely assigned to a GPU and multiple streamlets do not interfere with each other's operations.
-
-## Repository Structure
-
-- **src/main.tla**: The main TLA+ specification file describing the system model.
-- **deliverables/first_design.jpg**: A sketch of the initial design implemented in the specification. (Note: Some elements may have changed since the initial design phase.)
-- **deliverables/Project_Abstract.pdf**: Contains the project abstract.
