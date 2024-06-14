@@ -50,7 +50,9 @@ This setup examines scenarios where the number of streamlets exceeds the number 
 This setup should complete in a few seconds.
 
 ### Example
-A complete setup example should resemble the following (Image to be inserted).
+A complete setup example should resemble the following.
+
+![Example](deliverables/ModelOverview_Example.png)
 
 ## Liveness and Invariants
 
