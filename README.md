@@ -33,7 +33,9 @@ This configuration analyzes scenarios where the number of streamlets matches the
 - **DataType**: Set of Model Values -> {d1, d2}
 - **BoundedInt**: 1..3
 
-This configuration should complete in approximately 4 minutes.
+This configuration should complete in approximately 4 minutes. 
+
+![Output1](deliverables/SetUp1_output.png)
 
 ### Setup 2:
 This configuration is used to study cases where there are fewer streamlets than GPU kernels.
@@ -45,6 +47,8 @@ This configuration is used to study cases where there are fewer streamlets than 
 
 Expect this configuration to take around 3 minutes to complete.
 
+![Output2](deliverables/SetUp2_output.png)
+
 ### Setup 3:
 This setup examines scenarios where the number of streamlets exceeds the number of GPU kernels.
 - **N_KGPU**: 2
@@ -53,7 +57,9 @@ This setup examines scenarios where the number of streamlets exceeds the number 
 - **DataType**: Set of Model Values -> {d1, d2}
 - **BoundedInt**: 1..3
 
-This setup should complete in a few seconds.
+This setup should be completed in a few seconds.
+
+![Output3](deliverables/SetUp3_output.png)
 
 ### Example
 A complete setup example should resemble the following.
